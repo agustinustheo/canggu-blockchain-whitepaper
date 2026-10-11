@@ -1,3 +1,15 @@
+# Canggu Blockchain Whitepaper
+
+* **v1.3 (original):** `main.tex` / `Canggu_Blockchain_Whitepaper_v1_3.pdf` by Dendi Suhubdy,
+  Tejveer Singh, Mitul Dhawan and Maldini Sonkeng (Bitwyre).
+* **v2.0, Polkadot SDK edition:** [`v2/main.pdf`](v2/main.pdf) ([source](v2/main.tex)). It is an
+  independent rebuild of the original design on the Polkadot SDK
+  ([code](https://github.com/agustinustheo/canggu-blockchain)) that explores how far the SDK can be
+  pushed. It reports measurements and corrects the v1.3 claims that did not survive
+  implementation. The design and the original whitepaper remain the work of the v1.3 authors.
+
+Build v2.0 with `cd v2 && tectonic main.tex` (or `latexmk -xelatex main.tex`).
+
 ## Block Schematics of Size Blockchain
 
 <img src="./canggu-architecture-flowchart.png">
