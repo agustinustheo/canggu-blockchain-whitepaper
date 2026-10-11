@@ -1,0 +1,51 @@
+% Generated from `canggu bench --recipients 4,16,64,256,1024` and the end-to-end demo
+% (Apple M4 Pro, 12 cores, release build, polkadot-stable2609).
+
+\begin{table}[ht]
+\centering\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{ML-DSA-65 (pure Rust, one core)} & & \\
+\midrule
+Sign (deterministic) & \multicolumn{2}{r}{$\approx 0.75$\,ms} \\
+Verify (host function reference implementation) & \multicolumn{2}{r}{61\,\textmu s} \\
+Public key / signature & \multicolumn{2}{r}{1{,}952\,B / 3{,}309\,B} \\
+Signed \texttt{transfer\_keep\_alive} extrinsic & \multicolumn{2}{r}{5{,}345\,B} \\
+\bottomrule
+\end{tabular}
+\caption{Post-quantum account costs.}
+\label{tab:mldsa}
+\end{table}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+\textbf{Recipients $N$} & \textbf{Constraints} & \textbf{Setup} & \textbf{Prove} & \textbf{Verify} & \textbf{Proof} \\
+\midrule
+4    & 1{,}917   & 25\,ms  & 33\,ms  & 2.5\,ms & 192\,B \\
+16   & 6{,}669   & 57\,ms  & 68\,ms  & 2.3\,ms & 192\,B \\
+64   & 25{,}677  & 176\,ms & 185\,ms & 2.3\,ms & 192\,B \\
+256  & 101{,}709 & 0.60\,s & 0.57\,s & 2.3\,ms & 192\,B \\
+1024 & 405{,}837 & 2.3\,s  & 2.0\,s  & 2.3\,ms & 192\,B \\
+\bottomrule
+\end{tabular}
+\caption{Private payroll circuit, Groth16 over BLS12-381 (arkworks). Setup and proving use all
+cores on the CPU; verification is the single-threaded host function and includes decoding and
+subgroup-checking the verifying key. Proving cost grows linearly with $N$; verification does not.}
+\label{tab:zk}
+\end{table}
+
+\noindent
+Two observations matter for the design. First, the prover/verifier asymmetry is real and large:
+at $N = 1024$ proving takes $\sim 870\times$ longer than verifying (on 12 cores versus one), and every validator only
+pays the verifier's 2.3\,ms. Second, a careless circuit can scale quadratically. An early version
+of the gadget kept the running hash as a symbolic linear combination, so every MiMC round re-copied
+its whole history, and proving $N = 256$ took 119\,s instead of 0.57\,s. Materialising the hash
+state and each amount as a witness costs one constraint each and restores linear scaling.
+
+\paragraph{Capacity of the current configuration.} A block may contain up to 5\,MiB, of which 75\,\%
+is available to normal transactions, and 1\,s of execution weight in a 2\,s slot. With 5.3\,kB per
+ML-DSA transfer, a block holds about 740 transfers, so the chain is \emph{bandwidth-bound} at roughly
+370 transfers per second. Signature verification for those transfers takes about
+$740 \times 61\,\text{\textmu s} \approx 45$\,ms on one core, far from the weight limit.
