@@ -48,7 +48,7 @@
 \textit{Polkadot SDK edition (v2.0):}\\ Canggu contributors\\
 \small \url{https://github.com/agustinustheo/canggu-blockchain}}
 
-\date{October 11, 2026}
+\date{October 18, 2026}
 
 \begin{document}
 \maketitle
@@ -69,8 +69,10 @@ auction; (iii) on-chain Groth16 verification with an example ``private payroll''
 key-encapsulation mechanism and cannot sign transactions, XMSS is a signature scheme rather than a
 hash function, BLS12-381 SNARKs are \emph{not} quantum-resistant, and topological sorting does not
 make MEV extraction computationally hard. Finally, we argue where GPUs belong in a Polkadot SDK
-chain: behind deterministic host functions and in off-chain provers, not inside the state
-transition function.
+chain, which is behind deterministic host functions and in off-chain provers, not inside the state
+transition function, and demonstrate it: batches of ML-DSA signatures are verified on an Apple
+GPU through Metal, at up to $4.45\times$ the throughput of 12 CPU cores. A GPU validator and a
+CPU validator stay in consensus over the same blocks.
 \end{abstract}
 
 \tableofcontents
@@ -132,6 +134,7 @@ Tower BFT, rotating leader & Aura (round-robin slots, 2\,s) + GRANDPA finality &
 Sub-second finality & Not with GRANDPA; see \S\ref{sec:consensus} & \future \\
 ZK-SNARK verification & \texttt{pallet-zk-verifier}, host fn \texttt{groth16\_bls12\_381\_verify} & \impl \\
 GPU proof generation & Off-chain prover; GPU MSM/NTT back-ends (e.g.\ ICICLE) pluggable & \future \\
+GPU acceleration & Batch ML-DSA verification on Apple Metal behind a host function & \impl \\
 Parallel CPU/GPU contracts & Conflict-free batch payments; parallel executor & \partly \\
 50{,}000+ TPS & Not supported by measurements with PQ signatures; see \S\ref{sec:eval} & \status{revised} \\
 \bottomrule
@@ -571,7 +574,7 @@ batch ML-DSA verification (dominated by number-theoretic transforms), multi-scal
 and NTTs for SNARK/STARK verification, and bulk hashing. The deployment discipline is: a CPU
 reference implementation defines consensus, the GPU back-end is differentially tested against it,
 and nodes without a GPU fall back to the CPU. Canggu's \texttt{canggu\_crypto} interface is designed
-for this.
+for this, and \S\ref{sec:metal} implements it.
 
 \paragraph{Off-chain proving: the best fit.} Proof generation is dominated by MSMs and FFTs that
 parallelise extremely well, and its output is checked on-chain, so it does not have to be
@@ -584,6 +587,74 @@ instead of 3.3\,kB per transaction (\S\ref{sec:eval}).
 problem: run conflict-free transactions on different cores, using declared access sets such as
 those of the payroll pallet. JAM~\cite{graypaper} takes this further with many independent cores
 executing PolkaVM code in parallel.
+
+\subsection{A Metal implementation}
+\label{sec:metal}
+
+To test how close a Polkadot SDK chain can get to the GPU, Canggu adds a batch host function,
+\[
+\texttt{ml\_dsa\_65\_batch\_verify}\colon [(pk_i, m_i, \sigma_i)]_{i=1}^{n} \mapsto [b_i]_{i=1}^{n},
+\]
+and a consumer for it. In \texttt{pallet-pq-intents}, users sign transfer \emph{intents} off-chain
+and a relayer submits up to 640 of them in one extrinsic. The runtime makes a single host call per
+batch, then executes or rejects each intent independently. The node chooses at start-up where the
+call runs: one CPU core (the reference that defines the verdicts), all cores, or an Apple GPU via
+Metal (\texttt{--crypto-backend metal}).
+
+\paragraph{Kernels.} FIPS~204 verification is split at the point where work becomes fixed-size and
+data-parallel. A multi-threaded CPU stage decodes keys and signatures, checks hint encodings and the
+$\|z\|_\infty$ bound, and computes $tr$, $\mu$ and the challenge $c$. Four integer-only Metal kernels
+then compute the input NTTs, the matrix expansion fused with $\hat{A}\hat{z}$ (the dominant cost:
+30 SHAKE128 rejection-sampled polynomials per signature), the inverse NTT with UseHint and
+$w_1$ encoding, and the final SHAKE256 comparison with $\tilde{c}$. Small batches below 64
+signatures go to the CPU, because a GPU submission has a fixed latency of about 0.2\,ms.
+
+\paragraph{Bit-exactness.} A GPU that disagreed with the CPU on a single signature would fork its
+validator off the network, so correctness is established three ways:
+\begin{itemize}[leftmargin=*]
+  \item \emph{Differential tests.} The Metal kernels, a pure-Rust mirror of each kernel, and the
+        RustCrypto \texttt{ml-dsa} crate are compared on 5{,}454 items: 2{,}504 valid signatures,
+        and 2{,}950 corrupted ones (bit flips in every field, malformed hints, $z$ at the bound,
+        wrong contexts and lengths). All three agree on every item, both as one batch and as
+        random sub-batches.
+  \item \emph{Self-test.} At node start-up the GPU's UseHint is checked against the CPU for
+        \emph{every} input below $q$, along with the modular arithmetic and Keccak-f. During
+        development this caught a deliberately planted off-by-one that no real signature
+        exercises.
+  \item \emph{Consensus.} Two validators run with different backends, Metal and a single CPU core.
+        Aura alternates authors, so each batch is verified on the GPU by one validator and on the
+        CPU by the other. Six blocks of 256 intents each, with forgeries included, were authored
+        alternately by both validators and finalised. Both nodes report identical hashes for every
+        block.
+\end{itemize}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+\textbf{Batch} & \textbf{ml-dsa, 1 core} & \textbf{ml-dsa, 12 cores} & \textbf{Metal (wall)} & \textbf{GPU busy} & \textbf{vs 12 cores} \\
+\midrule
+1    & 0.060\,ms & 0.060\,ms & 0.330\,ms & 0.203\,ms & $0.18\times$ \\
+64   & 3.77\,ms  & 0.61\,ms  & 0.45\,ms  & 0.23\,ms  & $1.35\times$ \\
+256  & 15.2\,ms  & 1.95\,ms  & 0.85\,ms  & 0.43\,ms  & $2.29\times$ \\
+1024 & 61.2\,ms  & 7.52\,ms  & 2.12\,ms  & 1.50\,ms  & $3.55\times$ \\
+4096 & 246\,ms   & 29.0\,ms  & 6.51\,ms  & 5.59\,ms  & $4.45\times$ \\
+\bottomrule
+\end{tabular}
+\caption{Batch ML-DSA-65 verification on an Apple M4 Pro (medians). Metal wall time includes the
+CPU stage and buffer transfers; GPU busy time is reported by Metal's command-buffer timestamps.
+At 4{,}096 signatures the GPU verifies 630k signatures per second, 1.37\,\textmu s of GPU time each.}
+\label{tab:metal}
+\end{table}
+
+\paragraph{Assessment.} The GPU wins for batches of 64 signatures and more, and the advantage
+grows with batch size (Table~\ref{tab:metal}). Inside a live node, 640 signatures took 8.4\,ms of
+wall time and 4.1\,ms of GPU time. That is slower than the warm benchmark, because the batch is
+copied across the host-function boundary and the GPU was shared with other processes. Weights are
+still charged at single-core CPU cost, because every validator, GPU or not, must keep up. The GPU
+therefore buys headroom and lower block-execution latency, not a higher on-chain limit, unless the
+validator set agrees to assume GPU hardware. Only Metal is implemented. A CUDA back-end would sit
+behind the same interface and the same differential tests.
 
 %=====================================================================
 \section{Implementation and Evaluation}
@@ -604,6 +675,8 @@ The reference implementation targets \texttt{polkadot-stable2609} and Rust~1.93.
 \texttt{pallet-zk-verifier} & Groth16 verifying-key registry and proof verification \\
 \texttt{pallet-parallel-payroll} & Conflict-free batch payments \\
 \texttt{canggu-zk} & Private payroll circuit, setup and proving (off-chain) \\
+\texttt{pallet-pq-intents} & Batches of ML-DSA-signed intents, one batch host call \\
+\texttt{canggu-gpu} & ML-DSA-65 batch verification on Metal, CPU mirror, differential tests \\
 \texttt{canggu-runtime} & FRAME runtime wiring all of the above \\
 \texttt{canggu-node} & Aura + GRANDPA node with Canggu host functions \\
 \texttt{canggu-cli} & ML-DSA wallet, prover, end-to-end demo, benchmarks \\
@@ -649,8 +722,8 @@ STARK and replaces them with one proof. This is the strongest argument for the Z
         Commit--reveal and order-fairness protocols~\cite{aequitas} are alternatives.
   \item \textbf{Post-quantum proofs.} Add a STARK verifier host function and migrate circuits.
   \item \textbf{Signature compression} (\S\ref{sec:eval}) with GPU provers.
-  \item \textbf{GPU back-ends} for \texttt{canggu\_crypto}, differentially tested against the CPU
-        reference.
+  \item \textbf{More GPU back-ends.} CUDA next to Metal (\S\ref{sec:metal}), and GPU Groth16/STARK
+        verification behind the same differential-testing discipline.
   \item \textbf{Parallel block execution} using declared access sets.
   \item \textbf{Benchmarked weights}, a multi-party trusted setup ceremony, and audits.
   \item \textbf{Retire classical account signatures} by runtime upgrade.
