@@ -48,7 +48,7 @@
 \textit{Polkadot SDK edition (v2.0):}\\ Canggu contributors\\
 \small \url{https://github.com/agustinustheo/canggu-blockchain}}
 
-\date{October 18, 2026}
+\date{October 24, 2026}
 
 \begin{document}
 \maketitle
@@ -129,7 +129,7 @@ Kyber key management & ML-KEM is a KEM, not a signature; reserved for encrypted 
 XMSS ``hashing'' & BLAKE2b-256 for hashing; SLH-DSA (FIPS 205) as conservative signature option & \partly \\
 Hybrid (classical + PQ) & Either-or crypto agility: classical variants kept for migration & \impl \\
 DAG mempool & Pool \texttt{provides}/\texttt{requires} tags + \texttt{CheckDagParents} & \impl \\
-MEV mitigation & Dependency enforcement, no tips; encrypted mempool needed for full mitigation & \partly \\
+MEV mitigation & Dependency enforcement, no tips, sealed order-then-reveal (\S\ref{sec:sealed}) & \partly \\
 Tower BFT, rotating leader & Aura (round-robin slots, 2\,s) + GRANDPA finality & \impl \\
 Sub-second finality & Not with GRANDPA; see \S\ref{sec:consensus} & \future \\
 ZK-SNARK verification & \texttt{pallet-zk-verifier}, host fn \texttt{groth16\_bls12\_381\_verify} & \impl \\
@@ -421,7 +421,54 @@ re-sorting a dense DAG in $\Omega(n^2)$ time. We do not rely on this argument:
 What the DAG does provide is a \emph{safety} guarantee: dependencies that users state are enforced
 by consensus. Combined with tip removal, this eliminates intra-dependency reordering and paid
 priority. Mitigating front-running of independent transactions requires hiding transaction contents
-until their order is fixed (\S\ref{sec:limits}).
+until their order is fixed (\S\ref{sec:sealed}).
+
+\subsection{Sealed ordering: order first, reveal later}
+\label{sec:sealed}
+
+The Rand Protocol whitepaper~\cite{rand}, also by Dendi Suhubdy, corrects the same mistake in its own
+first draft. Hiding contents is not enough, because the party that orders can still order by
+metadata (its Proposition~14.2). Its Theorem~15.4 eliminates front-running under three conditions:
+(i) the order is fixed while contents are hidden; (ii) there is a single canonical order that binds
+the block producer; (iii) what is visible before ordering is uniform. Rand meets (i) with $t$-of-$n$
+threshold encryption~\cite{ferveo}. Practical schemes of that kind are pairing-based and not
+post-quantum, and the running Rand chain does not implement it. Canggu's
+\texttt{pallet-sealed-ordering} meets the three conditions with hash commitments:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Commit} in block $N$: anyone, typically a relayer, posts
+        \[ c = \mathsf{BLAKE2b}(\texttt{canggu/sealed/v1},\ \mathit{sender},\ \mathit{call},\
+        \mathit{salt}) \]
+        and locks a deposit. Commitments are uniform 32-byte values, and a relayer
+        hides the sender (iii).
+  \item \textbf{Reveal} in blocks $N{+}1 \dots N{+}w$: the sender publishes $(\mathit{call},
+        \mathit{salt})$. Because $c$ binds the sender, nobody else can reveal or replay it.
+  \item \textbf{Execute} at the start of block $N{+}w{+}1$: all revealed calls of block $N$ run in
+        increasing order of $\mathsf{BLAKE2b}(c \,\|\, \mathsf{hash}(N))$ (ii). This order does not
+        depend on inclusion or reveal order, and it cannot be computed when committing (i).
+        Unrevealed commitments forfeit their deposit.
+\end{enumerate}
+
+\begin{proposition}
+Let a victim's commitment be included in block $N$. Any transaction whose author learned the
+victim's call from its reveal executes after the victim's call.
+\end{proposition}
+\begin{proof}
+The reveal happens no earlier than block $N{+}1$, so a reacting commitment lands in a block
+$N' > N$. Block $N'$ settles at $N'{+}w{+}1 > N{+}w{+}1$, after all of block $N$'s calls. Within
+block $N$, every commitment was made without knowledge of the victim's call, and positions are
+fixed by $\mathsf{hash}(N)$, which is unknown when committing.
+\end{proof}
+
+Compared with threshold encryption, commit-reveal concedes three things. A sender may decline to
+reveal, a free option priced by the deposit. A leader may censor reveals within the window. The
+leader of block $N$ can bias $\mathsf{hash}(N)$, though that only permutes commitments whose
+contents nobody knows. Back-running is not addressed. On the dev chain, three senders revealed in
+reverse order and executed in the canonical order, and an unrevealed commitment forfeited its
+deposit. The pallet's tests check order independence and the proposition above. Anonymous
+commitments without a relayer could use ring-membership proofs such as Parity's
+\texttt{verifiable}~\cite{verifiable}, at the cost of reintroducing an elliptic-curve
+assumption.
 
 %=====================================================================
 \section{Consensus}
@@ -716,12 +763,15 @@ STARK and replaces them with one proof. This is the strongest argument for the Z
   \item \textbf{Post-quantum consensus keys.} Move Aura and GRANDPA session keys to ML-DSA. This
         needs keystore support, larger votes and justifications, and is a prerequisite for
         calling the chain, not only its accounts, quantum-secure.
-  \item \textbf{Encrypted mempool.} Encrypt transactions to a threshold key held by the
-        validators, and decrypt only after the block's order is fixed. This removes front-running
-        of independent transactions. Post-quantum threshold decryption is still a research topic.
-        Commit--reveal and order-fairness protocols~\cite{aequitas} are alternatives.
+  \item \textbf{Threshold-encrypted mempool.} Replace commit--reveal (\S\ref{sec:sealed}) with
+        encryption to a validator threshold key, which removes the free option and needs no
+        second transaction. Post-quantum threshold decryption is still a research topic;
+        order-fairness protocols~\cite{aequitas} are an alternative.
   \item \textbf{Post-quantum proofs.} Add a STARK verifier host function and migrate circuits.
-  \item \textbf{Signature compression} (\S\ref{sec:eval}) with GPU provers.
+  \item \textbf{Signature compression} (\S\ref{sec:eval}) following Rand's block-level
+        aggregation~\cite{rand}: GPU aggregators prove a STARK over the ML-DSA verifications of a
+        window of finalised blocks off the critical path, the aggregate that covers the most wins,
+        and proofs are bound to their aggregator.
   \item \textbf{More GPU back-ends.} CUDA next to Metal (\S\ref{sec:metal}), and GPU Groth16/STARK
         verification behind the same differential-testing discipline.
   \item \textbf{Parallel block execution} using declared access sets.
