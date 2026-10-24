@@ -131,7 +131,7 @@ Hybrid (classical + PQ) & Either-or crypto agility: classical variants kept for 
 DAG mempool & Pool \texttt{provides}/\texttt{requires} tags + \texttt{CheckDagParents} & \impl \\
 MEV mitigation & Dependency enforcement, no tips, sealed order-then-reveal (\S\ref{sec:sealed}) & \partly \\
 Tower BFT, rotating leader & Aura (round-robin slots, 2\,s) + GRANDPA finality & \impl \\
-Sub-second finality & Not with GRANDPA; see \S\ref{sec:consensus} & \future \\
+Sub-second finality & Tuned GRANDPA: 242\,ms p50 on localhost (\S\ref{sec:consensus}) & \partly \\
 ZK-SNARK verification & \texttt{pallet-zk-verifier}, host fn \texttt{groth16\_bls12\_381\_verify} & \impl \\
 GPU proof generation & Off-chain prover; GPU MSM/NTT back-ends (e.g.\ ICICLE) pluggable & \future \\
 GPU acceleration & Batch ML-DSA verification on Apple Metal behind a host function & \impl \\
@@ -486,12 +486,45 @@ production and BFT finality with components that are proven in production:
         vote on the highest block they consider final, and a supermajority ($>2/3$) finalises the
         chain up to that block.
 \end{itemize}
-With 2-second slots, blocks finalise a few seconds after authoring. \emph{Sub-second} finality as
-claimed in v1.3 is not achievable with GRANDPA's message pattern. It would require a
-latency-optimised BFT protocol (for example a DAG-based protocol such as
-Bullshark~\cite{spiegelman2022bullsharkdagbftprotocols}) as a custom finality gadget. Alternatively,
-Canggu could run as a Polkadot parachain or JAM service~\cite{graypaper} and inherit shared security
-in exchange for relay-chain finality latency. Both options remain open.
+With Substrate's defaults, blocks finalise about five seconds after they appear. Measurement shows
+that this is not GRANDPA's message pattern but two conservative parameters. The voting rule
+$\textsc{BeforeBestBlockBy}(2)$ makes validators vote two blocks behind the best block, which costs
+two slot times. A voter also waits up to $2g$ before prevoting and $4g$ before precommitting, where
+$g$ is the gossip duration (333\,ms by default). Lowering the vote lag does not affect safety: a
+block is final only with precommits from more than two-thirds of the voters, and votes for a
+losing fork finalise the common ancestor instead. Both parameters are exposed as node flags, and
+the slot length as a compile-time constant.
+
+\begin{table}[ht]
+\centering\small
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+\textbf{Slot} & \textbf{Gossip $g$} & \textbf{Vote lag} & \textbf{Finality p50} & \textbf{p90} \\
+\midrule
+2\,s   & 333\,ms & 2 & 5\,s     & 6\,s \\
+2\,s   & 333\,ms & 0 & 1\,s     & 2\,s \\
+2\,s   & 50\,ms  & 0 & 242\,ms  & 288\,ms \\
+500\,ms & 333\,ms & 2 & 2\,s    & 3\,s \\
+500\,ms & 50\,ms & 0 & 217\,ms  & 293\,ms \\
+500\,ms & 25\,ms & 0 & 121\,ms  & 173\,ms \\
+\bottomrule
+\end{tabular}
+\caption{Time from a block's first appearance to its finalisation, two validators on localhost.}
+\label{tab:finality}
+\end{table}
+
+Table~\ref{tab:finality} is a lower bound: on localhost messages arrive almost instantly. Over a
+real network $g$ must exceed the message delay between validators, and each round needs about two
+delays. A validator set with 50--100\,ms between members should therefore finalise in well under a
+second, while a globally distributed one probably will not. v1.3's sub-second claim is reachable
+with GRANDPA for a geographically compact validator set, and remains to be measured over a real
+network.
+
+Running as a Polkadot parachain or JAM service~\cite{graypaper} instead would buy shared security,
+at the cost of relay-chain finality latency. It would also cost Canggu its custom host functions
+(\S\ref{sec:pq}, \S\ref{sec:metal}): relay-chain validators re-execute parachain blocks with
+Polkadot's standard host interface, so ML-DSA and proof verification would have to run inside the
+runtime, and the GPU back-end would not apply.
 
 %=====================================================================
 \section{Zero-Knowledge Verification}
@@ -812,7 +845,7 @@ FIFO sorting is $O(n)$ / $O(n \log n)$ (both stated). & Neither is relevant: Sub
 Groth16 verification is $O(1)$. & $O(\ell)$ in the number of public inputs, independent of circuit size. \\
 Solana executes transactions sequentially in a single thread. & Solana's Sealevel executes non-conflicting transactions in parallel. Canggu's distinction is GPU acceleration, not parallelism as such. \\
 50{,}000+ TPS with Dilithium signatures. & Not supported. Requires signature compression (\S\ref{sec:eval}). \\
-Sub-second finality with Tower-BFT-style consensus. & Aura + GRANDPA finalises in seconds. Sub-second needs a different gadget. \\
+Sub-second finality with Tower-BFT-style consensus. & Aura + GRANDPA does it once the vote lag and gossip duration are tuned (localhost measurement; network latency pending). \\
 \bottomrule
 \end{tabularx}
 \end{table}
