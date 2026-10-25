@@ -48,7 +48,7 @@
 \textit{Polkadot SDK edition (v2.0):}\\ Canggu contributors\\
 \small \url{https://github.com/agustinustheo/canggu-blockchain}}
 
-\date{October 24, 2026}
+\date{October 25, 2026}
 
 \begin{document}
 \maketitle
@@ -132,7 +132,8 @@ DAG mempool & Pool \texttt{provides}/\texttt{requires} tags + \texttt{CheckDagPa
 MEV mitigation & Dependency enforcement, no tips, sealed order-then-reveal (\S\ref{sec:sealed}) & \partly \\
 Tower BFT, rotating leader & Aura (round-robin slots, 2\,s) + GRANDPA finality & \impl \\
 Sub-second finality & Tuned GRANDPA: 242\,ms p50 on localhost (\S\ref{sec:consensus}) & \partly \\
-ZK-SNARK verification & \texttt{pallet-zk-verifier}, host fn \texttt{groth16\_bls12\_381\_verify} & \impl \\
+ZK-SNARK verification & \texttt{pallet-zk-verifier}: Groth16 and post-quantum SP1 STARKs (\S\ref{sec:sp1}) & \impl \\
+Signature compression & One SP1 proof per intent batch replaces all keys and signatures (\S\ref{sec:sp1}) & \partly \\
 GPU proof generation & Off-chain prover; GPU MSM/NTT back-ends (e.g.\ ICICLE) pluggable & \future \\
 GPU acceleration & Batch ML-DSA verification on Apple Metal behind a host function & \impl \\
 Parallel CPU/GPU contracts & Conflict-free batch payments; parallel executor & \partly \\
@@ -579,10 +580,69 @@ standard but the implementation has not been audited.
         on discrete logarithms in groups of roughly 255 bits, which Shor's algorithm breaks. A
         quantum adversary could \emph{forge} Groth16 proofs, although Groth16's perfect
         zero-knowledge means it could not extract witnesses from existing proofs. The post-quantum
-        path is hash-based proof systems (STARKs/FRI~\cite{starks}), whose proofs are tens to
-        hundreds of kilobytes. The verifier pallet's host-function design allows adding such a
-        verifier alongside Groth16.
+        path is hash-based proof systems (STARKs/FRI~\cite{starks}), and Canggu now has one
+        (\S\ref{sec:sp1}).
 \end{itemize}
+
+\subsection{Post-quantum proofs and signature compression with SP1}
+\label{sec:sp1}
+
+SP1~\cite{sp1} proves the execution of ordinary Rust programs compiled to RISC-V. Its
+\emph{compressed} proofs are STARKs over the KoalaBear field with Poseidon2 Merkle commitments and
+FRI. They use no pairings or elliptic curves, rely only on hash functions, and need no trusted
+setup. Canggu verifies them with one more host function, \texttt{sp1\_v6\_verify\_compressed}.
+SP1's verifier does not build for the \texttt{wasm32v1-none} target that Polkadot SDK runtimes
+use. Two programs use it:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Payroll.} The statement of \S\ref{sec:zk} written as a short Rust function,
+        with a Keccak commitment instead of MiMC. \texttt{pallet-zk-verifier} accepts its proofs
+        next to Groth16 and records the statement $(\mathit{program}, \mathit{public\ values})$.
+  \item \textbf{Signature compression.} An ML-DSA-65 verifier runs inside SP1 with Keccak-f
+        delegated to SP1's precompile. It is bit-exact with the RustCrypto implementation on 4{,}280
+        native cases and 460 zkVM executions. It proves that every $(pk_i, m_i, \sigma_i)$ in a
+        batch is valid and commits
+        \[
+          n \,\|\, \mathsf{Keccak}(\mathit{ctx}) \,\|\, \mathsf{Keccak}\Bigl(\textstyle\big\|_i\,
+          \mathsf{BLAKE2b}(pk_i) \,\|\, \mathsf{Keccak}(m_i)\Bigr).
+        \]
+        \texttt{pallet-pq-intents::submit\_compressed} receives only $(\mathit{sender}_i,
+        \mathit{intent}_i)$ pairs and the proof. Because accounts are $\mathsf{BLAKE2b}(pk)$, the
+        runtime can rebuild the committed value from the intents and the genesis hash alone, so
+        the proof binds exactly these senders and intents on this chain. No key or signature
+        reaches the block.
+\end{itemize}
+
+\begin{table}[ht]
+\centering\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+Proof size (any program, any batch) & 1{,}272{,}546\,B \\
+Verification (native / through the node's host function) & 25.5\,ms / $\approx$40\,ms \\
+ML-DSA-65 inside SP1 (with / without Keccak precompile) & 0.70\,M / 1.83\,M cycles \\
+Proving \texttt{mldsa-batch}, 4 / 64 / 128 signatures & 72\,s / 617\,s / 1{,}219\,s \\
+Peak memory while proving & 15--17\,GB \\
+Break-even against raw keys and signatures & $\approx$242 signatures ($\approx$37\,min) \\
+Proving \texttt{payroll}, 16 / 65{,}536 amounts & 50\,s / 141\,s \\
+\bottomrule
+\end{tabular}
+\caption{SP1 v6.10 on an Apple M4 Pro, CPU prover. Live on a development chain, a five-salary
+payroll proof took 59\,s and an eight-intent compressed batch 113\,s to prove. Both verified on
+chain.}
+\label{tab:sp1}
+\end{table}
+
+Table~\ref{tab:sp1} gives the economics. A compressed proof costs as much block space as
+$\approx$242 ML-DSA keys and signatures, and the CPU prover spends $\approx$9.4\,s per signature.
+Compression therefore works end to end but is a net loss on a laptop: the eight-intent demonstration
+batch is 30 times larger than the signatures it replaces. It pays off for batches of hundreds of
+signatures proven on GPUs (SP1's GPU prover targets CUDA), which is the regime Rand Protocol's
+pipelined aggregator market~\cite{rand} is designed for. Two findings matter for any chain adopting
+SP1. First, the raw verifier accepts several byte strings for one valid proof: it ignores trailing
+bytes and silently reduces field elements $\geq p$. Canggu's wrapper accepts only the canonical
+encoding, which matters for anything that hashes or deduplicates proofs. Second, SP1's default
+prover settings exceeded 33\,GB of memory at 16 signatures, so a memory-safe configuration
+is part of the tooling.
 
 %=====================================================================
 \section{Parallel Execution}
@@ -786,6 +846,9 @@ cores and is not the binding constraint. Bandwidth and storage are. We therefore
 50{,}000\,TPS. Reaching that order of magnitude with post-quantum signatures requires
 \emph{signature compression}: the leader, or a GPU prover, verifies the block's signatures inside a
 STARK and replaces them with one proof. This is the strongest argument for the ZK pillar.
+\S\ref{sec:sp1} implements it per intent batch and measures the price: a 1.27\,MB proof, so
+compression saves space only above $\approx$242 signatures, and minutes to hours of proving
+unless GPUs do it.
 
 %=====================================================================
 \section{Limitations and Roadmap}
@@ -800,9 +863,10 @@ STARK and replaces them with one proof. This is the strongest argument for the Z
         encryption to a validator threshold key, which removes the free option and needs no
         second transaction. Post-quantum threshold decryption is still a research topic;
         order-fairness protocols~\cite{aequitas} are an alternative.
-  \item \textbf{Post-quantum proofs.} Add a STARK verifier host function and migrate circuits.
-  \item \textbf{Signature compression} (\S\ref{sec:eval}) following Rand's block-level
-        aggregation~\cite{rand}: GPU aggregators prove a STARK over the ML-DSA verifications of a
+  \item \textbf{Post-quantum proofs.} Done with SP1 (\S\ref{sec:sp1}). Retire the Groth16 path and
+        pin the verifier version through host-function versioning.
+  \item \textbf{Windowed signature compression.} Per-batch compression works
+        (\S\ref{sec:sp1}); scale it with Rand's block-level aggregation~\cite{rand}: GPU aggregators prove a STARK over the ML-DSA verifications of a
         window of finalised blocks off the critical path, the aggregate that covers the most wins,
         and proofs are bound to their aggregator.
   \item \textbf{More GPU back-ends.} CUDA next to Metal (\S\ref{sec:metal}), and GPU Groth16/STARK
