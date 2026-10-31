@@ -7,6 +7,10 @@
   ([code](https://github.com/agustinustheo/canggu-blockchain)) that explores how far the SDK can be
   pushed. It reports measurements and corrects the v1.3 claims that did not survive
   implementation. The design and the original whitepaper remain the work of the v1.3 authors.
+  The v2.0 text and the code it describes were written by Claude, an AI model made by Anthropic,
+  directed and published by [agustinustheo](https://github.com/agustinustheo).
+* **The book:** [agustinustheodorus.com/canggu-blockchain](https://agustinustheodorus.com/canggu-blockchain/)
+  explains the whole project for newcomers.
 
 Build v2.0 with `cd v2 && tectonic main.tex` (or `latexmk -xelatex main.tex`).
 
